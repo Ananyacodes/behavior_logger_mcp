@@ -1,10 +1,10 @@
-# Neurolock - Behavior Logger System
+# Behavior Logger System
 
 An intelligent behavior monitoring and anomaly detection system that leverages machine learning to identify suspicious user patterns in real-time.
 
 ## Overview
 
-Neurolock captures user interactions (keystrokes, mouse movements, system metrics), processes them through cryptographic hashing, and uses neural networks to detect anomalous behavior patterns that could indicate security threats or unauthorized access.
+It captures user interactions (keystrokes, mouse movements, system metrics), processes them through cryptographic hashing, and uses neural networks to detect anomalous behavior patterns that could indicate security threats or unauthorized access.
 
 ## Features
 
