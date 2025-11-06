@@ -10,6 +10,16 @@ import urllib.request
 import traceback
 from datetime import datetime
 import json
+from math import exp
+try:
+    from joblib import load
+    HAS_JOBLIB = True
+except Exception:
+    HAS_JOBLIB = False
+
+# Paths for optional sklearn model (IsolationForest) saved by training script
+IF_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'models', 'if_model_v1.joblib')
+IF_SCALER_PATH = os.path.join(os.path.dirname(__file__), 'models', 'if_scaler_v1.joblib')
 
 # Add utils directory to path
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
@@ -39,7 +49,6 @@ def setup_database():
     try:
         conn = get_jdbc_connection()
         cursor = conn.cursor()
-
         # Create behavior_logs table if it doesn't exist
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS behavior_logs (
@@ -49,11 +58,32 @@ def setup_database():
                 hashed_event TEXT,
                 raw_data JSON,
                 prediction INTEGER,
+                anomaly_score DOUBLE,
+                detector VARCHAR(64),
+                model_version VARCHAR(32),
+                detected_by VARCHAR(32),
                 processed_at TIMESTAMP NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
 
+        # Ensure new columns exist (ALTER TABLE ... ADD COLUMN IF NOT EXISTS)
+        try:
+            cursor.execute("ALTER TABLE behavior_logs ADD COLUMN IF NOT EXISTS anomaly_score DOUBLE")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE behavior_logs ADD COLUMN IF NOT EXISTS detector VARCHAR(64)")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE behavior_logs ADD COLUMN IF NOT EXISTS model_version VARCHAR(32)")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE behavior_logs ADD COLUMN IF NOT EXISTS detected_by VARCHAR(32)")
+        except Exception:
+            pass
         # Create anomaly_stats table for tracking
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS anomaly_stats (
@@ -68,7 +98,6 @@ def setup_database():
             )
         """)
 
-        # No need to call commit() when autocommit is true
         cursor.close()
         conn.close()
         print("[OK] Database schema verified")
@@ -78,7 +107,7 @@ def setup_database():
         return False
 
 # Global flag to indicate if we're running without database
-SKIP_DB_MODE = False  # Default to using database
+SKIP_DB_MODE = False  
 
 def ensure_jvm_started():
     """Ensure JVM is started with correct JDBC driver"""
@@ -202,22 +231,47 @@ def process_unprocessed_logs():
             
             print(f"\nProcessing batch of {len(unprocessed_rows)} events...")
             
-            # Load model
+            # Load model artifacts (prefer IsolationForest if available)
             model = None
+            scaler = None
             model_available = False
-            if os.path.exists(MODEL_PATH):
+            model_type = None
+            model_version = None
+
+            # Try sklearn IsolationForest artifacts first
+            if HAS_JOBLIB and os.path.exists(IF_MODEL_PATH) and os.path.exists(IF_SCALER_PATH):
+                try:
+                    from joblib import load
+                    clf = load(IF_MODEL_PATH)
+                    scaler = load(IF_SCALER_PATH)
+                    model = clf
+                    model_available = True
+                    model_type = 'iforest'
+                    # derive a model_version string from the filename (basename without extension)
+                    model_version = os.path.splitext(os.path.basename(IF_MODEL_PATH))[0]
+                    print(f"[OK] Loaded IsolationForest model: {IF_MODEL_PATH} (version: {model_version})")
+                except Exception as e:
+                    print(f"[WARN] Failed to load IsolationForest artifacts: {e}")
+                    model = None
+                    scaler = None
+                    model_available = False
+
+            # If sklearn model not available, fall back to GRU (if present) or rules
+            if not model_available and os.path.exists(MODEL_PATH):
                 try:
                     model = GRUModel()
                     model.load_state_dict(torch.load(MODEL_PATH))
                     model.eval()
                     model_available = True
-                    print(f"[OK] Loaded model from {MODEL_PATH}")
+                    model_type = 'gru'
+                    model_version = os.path.splitext(os.path.basename(MODEL_PATH))[0]
+                    print(f"[OK] Loaded GRU model from {MODEL_PATH} (version: {model_version})")
                 except Exception as e:
-                    print(f"[WARN] Failed to load model: {e}")
+                    print(f"[WARN] Failed to load GRU model: {e}")
                     model = None
                     model_available = False
-            else:
-                print(f"[WARN] Model not found: {MODEL_PATH} - using rule-based fallback")
+            elif not model_available:
+                print(f"[WARN] No model artifacts found - using rule-based fallback")
             
             anomaly_count = 0
             normal_count = 0
@@ -234,19 +288,73 @@ def process_unprocessed_logs():
                     
                     # Get prediction and confidence
                     if model_available and model is not None:
-                        with torch.no_grad():
-                            output = model(hash_tensor)
-                            probabilities = torch.softmax(output, dim=1)
-                            prediction = torch.argmax(output, dim=1).item()
-                            confidence = probabilities[0][prediction].item()
+                        if model_type == 'iforest' and scaler is not None:
+                            # Build basic feature vector consistent with train_iforest.py
+                            try:
+                                if raw_data and isinstance(raw_data, (str,)):
+                                    rd = json.loads(raw_data)
+                                elif isinstance(raw_data, dict):
+                                    rd = raw_data
+                                else:
+                                    rd = {}
+                            except Exception:
+                                rd = {}
+
+                            cpu = float(rd.get('cpu_percent', 0) or 0)
+                            mem = float(rd.get('memory_percent', 0) or 0)
+                            length = float(len(json.dumps(rd))) if rd is not None else 0.0
+                            # event type encoding
+                            type_code = 0.0
+                            if event_type:
+                                et = str(event_type).upper()
+                                if 'SYSTEM' in et:
+                                    type_code = 1.0
+                                elif 'KEY' in et or 'KEYSTROKE' in et:
+                                    type_code = 2.0
+                                elif 'MOUSE' in et:
+                                    type_code = 3.0
+                            feats = [cpu, mem, length, type_code]
+                            import numpy as _np
+                            X = _np.array([feats], dtype=float)
+                            Xs = scaler.transform(X)
+
+                            # In IsolationForest a more-negative decision_function indicates more anomalous.
+                            try:
+                                raw_score = -float(model.decision_function(Xs)[0])
+                            except Exception:
+                                # fallback to score_samples if decision_function unavailable
+                                raw_score = -float(model.score_samples(Xs)[0])
+
+                            # map raw_score -> (0,1) via a logistic transform for human-friendly anomaly_score
+                            anomaly_score = 1.0 / (1.0 + exp(-raw_score))
+                            # prediction: 1 if anomaly_score above threshold (0.5 by default)
+                            prediction = 1 if anomaly_score >= 0.5 else 0
+                            confidence = float(anomaly_score)
+                            detected_by = 'model'
+                            detector = 'IsolationForest'
+                        else:
+                            # GRU model path (existing implementation)
+                            with torch.no_grad():
+                                output = model(hash_tensor)
+                                probabilities = torch.softmax(output, dim=1)
+                                prediction = torch.argmax(output, dim=1).item()
+                                confidence = probabilities[0][prediction].item()
+                            detected_by = 'model'
+                            detector = 'GRU'
+                            anomaly_score = float(confidence)
                     else:
                         # Simple fallback rule: if event_type contains 'KEY' or 'MOUSE', treat as normal (0)
                         # if event_type contains 'SYSTEM' or raw_data has high cpu, mark as anomaly (1)
                         prediction = 0
                         confidence = 0.65
+                        anomaly_score = 0.0
+                        detector = 'heuristic'
+                        detected_by = 'collector'  # heuristic/run-time rule
                         if event_type and 'SYSTEM' in str(event_type).upper():
                             prediction = 1
                             confidence = 0.7
+                            anomaly_score = 0.7
+                            detected_by = 'collector'
                         elif raw_data and isinstance(raw_data, (str,)):
                             # try to inspect JSON for cpu_percent
                             try:
@@ -255,17 +363,24 @@ def process_unprocessed_logs():
                                 if cpu and float(cpu) > 90:
                                     prediction = 1
                                     confidence = 0.8
+                                    anomaly_score = 0.85
+                                    detected_by = 'collector'
                             except Exception:
                                 pass
                     
                     # Update database
+                    # Persist prediction and anomaly metadata
                     cursor.execute("""
                         UPDATE behavior_logs 
                         SET prediction = ?,
+                            anomaly_score = ?,
+                            detector = ?,
+                            model_version = ?,
+                            detected_by = ?,
                             processed_at = CURRENT_TIMESTAMP,
                             hashed_event = NULL
                         WHERE id = ?
-                    """, (prediction, row_id))
+                    """, (prediction, anomaly_score, detector, model_version, detected_by, row_id))
                     
                     # Update counts
                     if prediction == 1:
@@ -284,6 +399,7 @@ def process_unprocessed_logs():
                     cursor.execute("""
                         UPDATE behavior_logs 
                         SET prediction = -1,
+                            detected_by = 'processor_error',
                             processed_at = CURRENT_TIMESTAMP,
                             hashed_event = NULL
                         WHERE id = ?

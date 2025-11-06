@@ -2,7 +2,6 @@ import java.awt.*;
 import java.io.*;
 import java.sql.*;
 import java.text.SimpleDateFormat;
-import java.text.DecimalFormat;
 import java.util.*;
 import java.util.Date;
 import java.util.concurrent.Executors;
@@ -43,15 +42,12 @@ public class BehaviorLoggerUI extends JFrame {
     private JLabel totalEventsCount;
     private JProgressBar cpuUsageBar;
     private JProgressBar memoryUsageBar;
-    private javax.swing.JList<String> recentAppsList;
     // JFreeChart time series for events/sec
     private TimeSeries eventsPerSecSeries;
     private ChartPanel eventsChartPanel;
     // Internal processor scheduler
     private ScheduledExecutorService processorScheduler;
     private boolean processorRunning = false;
-    // Prevent concurrent background rescoring runs
-    private volatile boolean rescoreRunning = false;
     // Analytics labels for anomalies
     private JLabel anomalyCountLabel;
     private JLabel avgConfidenceLabel;
@@ -77,8 +73,6 @@ public class BehaviorLoggerUI extends JFrame {
     // Logger
     private PrintWriter logWriter;
     private SimpleDateFormat dateFormat = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
-    // Formatter for anomaly_score display in UI (three decimals)
-    private DecimalFormat anomalyScoreFormat = new DecimalFormat("#0.000");
 
     // Database connection info
     private String dbUrl = "jdbc:mysql://localhost:3306/neurolock";
@@ -105,8 +99,6 @@ public class BehaviorLoggerUI extends JFrame {
     private void initComponents() {
         // Create main layout
         setLayout(new BorderLayout());
-        // Set overall background to light gray (UI design update only)
-        getContentPane().setBackground(Color.LIGHT_GRAY);
         
         // Setup logging
         try {
@@ -141,7 +133,7 @@ public class BehaviorLoggerUI extends JFrame {
         filterButton.addActionListener(e -> showFilterDialog());
         
     // Auto-refresh checkbox
-        JCheckBox autoRefreshCheckbox = new JCheckBox("Real-time Streaming");
+    JCheckBox autoRefreshCheckbox = new JCheckBox("Real-time Streaming");
         
         // Export button
         exportButton = new JButton("Export");
@@ -184,30 +176,30 @@ public class BehaviorLoggerUI extends JFrame {
         toolbarPanel.add(realTimeIndicator);
         toolbarPanel.add(realTimeProgress);
         toolbarPanel.add(exportButton);
-        toolbarPanel.add(liveLogButton);
+    toolbarPanel.add(liveLogButton);
         
         // Create control panel
         JPanel controlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         startLoggingButton = new JButton("Start Logging");
         stopLoggingButton = new JButton("Stop Logging");
         stopLoggingButton.setEnabled(false);
-        startProcessorButton = new JButton("Start Processor");
-        stopProcessorButton = new JButton("Stop Processor");
-        stopProcessorButton.setEnabled(false);
+    startProcessorButton = new JButton("Start Processor");
+    stopProcessorButton = new JButton("Stop Processor");
+    stopProcessorButton.setEnabled(false);
         
         startAnalysisButton = new JButton("Analyze Behavior");
         
         startLoggingButton.addActionListener(e -> startLogging());
         stopLoggingButton.addActionListener(e -> stopLogging());
         startAnalysisButton.addActionListener(e -> analyzeData());
-        startProcessorButton.addActionListener(e -> startProcessor());
-        stopProcessorButton.addActionListener(e -> stopProcessor());
+    startProcessorButton.addActionListener(e -> startProcessor());
+    stopProcessorButton.addActionListener(e -> stopProcessor());
         
         controlPanel.add(startLoggingButton);
         controlPanel.add(stopLoggingButton);
         controlPanel.add(startAnalysisButton);
-        controlPanel.add(startProcessorButton);
-        controlPanel.add(stopProcessorButton);
+    controlPanel.add(startProcessorButton);
+    controlPanel.add(stopProcessorButton);
         
         JPanel topPanel = new JPanel(new BorderLayout());
         topPanel.add(toolbarPanel, BorderLayout.NORTH);
@@ -239,8 +231,7 @@ public class BehaviorLoggerUI extends JFrame {
         tabbedPane.addTab("Data View", tableScrollPane);
         
         // Create analytics tab
-    analyticsPanel = new JPanel();
-    analyticsPanel.setBackground(Color.LIGHT_GRAY);
+        analyticsPanel = new JPanel();
         analyticsPanel.setLayout(new BorderLayout());
         
         JPanel statsPanel = new JPanel(new GridLayout(0, 2, 10, 5));
@@ -256,7 +247,6 @@ public class BehaviorLoggerUI extends JFrame {
         
         JPanel resourcePanel = new JPanel(new GridLayout(0, 1, 10, 5));
         resourcePanel.setBorder(BorderFactory.createTitledBorder("System Resources"));
-    resourcePanel.setBackground(Color.LIGHT_GRAY);
         
         JPanel cpuPanel = new JPanel(new BorderLayout(5, 0));
         cpuPanel.add(new JLabel("CPU:"), BorderLayout.WEST);
@@ -279,13 +269,6 @@ public class BehaviorLoggerUI extends JFrame {
         
         analyticsPanel.add(northStatsPanel, BorderLayout.NORTH);
         
-    // Recent applications list
-    recentAppsList = new javax.swing.JList<>(new javax.swing.DefaultListModel<>());
-    JScrollPane recentAppsScroll = new JScrollPane(recentAppsList);
-    recentAppsScroll.setPreferredSize(new Dimension(200, 120));
-    recentAppsScroll.setBorder(BorderFactory.createTitledBorder("Recent Applications"));
-    analyticsPanel.add(recentAppsScroll, BorderLayout.EAST);
-
         // Add placeholder for chart
         JPanel chartPanel = new JPanel();
         chartPanel.setLayout(new BorderLayout());
@@ -404,7 +387,9 @@ public class BehaviorLoggerUI extends JFrame {
         }
     }
 
+    // Update the events/sec time series (called on each refresh tick)
     private void updateChartSeries() {
+        // Query recent events count efficiently
         try (Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
             boolean hasTimestamp = hasColumn("behavior_logs", "timestamp");
             double eventsPerSec = 0.0;
@@ -417,11 +402,13 @@ public class BehaviorLoggerUI extends JFrame {
                         eventsPerSec = rs.getInt(1);
                     }
                 } catch (SQLException e) {
+                    // fallback to id-delta
                     hasTimestamp = false;
                 }
             }
 
             if (!hasTimestamp) {
+                // use lastSeenId delta across all tables as approximation
                 try (Statement stmt = conn.createStatement()) {
                     ResultSet rs = stmt.executeQuery("SELECT MAX(id) FROM behavior_logs");
                     long maxId = 0;
@@ -436,10 +423,13 @@ public class BehaviorLoggerUI extends JFrame {
             SwingUtilities.invokeLater(() -> {
                 try {
                     eventsPerSecSeries.addOrUpdate(new Second(new Date()), eps);
+                    // trim series to last 10 minutes (~600 points at 1s)
                     if (eventsPerSecSeries.getItemCount() > 600) {
                         eventsPerSecSeries.delete(0, eventsPerSecSeries.getItemCount() - 600 - 1);
                     }
-                } catch (Exception ex) {}
+                } catch (Exception ex) {
+                    // ignore duplicate time item issues
+                }
             });
         } catch (SQLException e) {
             log("Chart update failed: " + e.getMessage());
@@ -649,172 +639,6 @@ public class BehaviorLoggerUI extends JFrame {
                 
                 log("Loaded " + rowCount + " rows from " + tableName);
 
-                // Convert numeric prediction column values to human labels for display
-                try {
-                    int predColIndex = -1;
-                    for (int c = 0; c < tableModel.getColumnCount(); c++) {
-                        String colName = tableModel.getColumnName(c);
-                        if (colName != null && colName.equalsIgnoreCase("prediction")) { predColIndex = c; break; }
-                    }
-                    if (predColIndex != -1) {
-                        for (int r = 0; r < tableModel.getRowCount(); r++) {
-                            Object val = tableModel.getValueAt(r, predColIndex);
-                            if (val instanceof Number) {
-                                int p = ((Number)val).intValue();
-                                tableModel.setValueAt(p == 1 ? "Anomaly" : "Normal", r, predColIndex);
-                            } else if (val != null) {
-                                try {
-                                    int p = Integer.parseInt(val.toString());
-                                    tableModel.setValueAt(p == 1 ? "Anomaly" : "Normal", r, predColIndex);
-                                } catch (Exception ex) { /* leave as-is */ }
-                            }
-                        }
-                    }
-                } catch (Exception ex) {
-                    // ignore conversion errors
-                }
-
-                // Format anomaly_score column (if present) to three decimal places for readability
-                try {
-                    int scoreColIndex = -1;
-                    for (int c = 0; c < tableModel.getColumnCount(); c++) {
-                        String colName = tableModel.getColumnName(c);
-                        if (colName != null && colName.equalsIgnoreCase("anomaly_score")) { scoreColIndex = c; break; }
-                    }
-                    if (scoreColIndex != -1) {
-                        for (int r = 0; r < tableModel.getRowCount(); r++) {
-                            Object sval = tableModel.getValueAt(r, scoreColIndex);
-                            if (sval instanceof Number) {
-                                double dv = ((Number) sval).doubleValue();
-                                tableModel.setValueAt(anomalyScoreFormat.format(dv), r, scoreColIndex);
-                            } else if (sval != null) {
-                                try {
-                                    double dv = Double.parseDouble(sval.toString());
-                                    tableModel.setValueAt(anomalyScoreFormat.format(dv), r, scoreColIndex);
-                                } catch (Exception ex) { /* leave as-is */ }
-                            }
-                        }
-                    }
-                } catch (Exception ex) {
-                    // ignore formatting errors
-                }
-
-                // Additional presentation for behavior_logs: extract app name/window title and ensure detector/anomaly_score placeholders
-                try {
-                    if ("behavior_logs".equalsIgnoreCase(tableName)) {
-                        int rawCol = getColumnIndexByName("behavior_logs", "raw_data");
-                        int evtCol = getColumnIndexByName("behavior_logs", "event_type");
-                        int scoreCol = getColumnIndexByName("behavior_logs", "anomaly_score");
-                        int detCol = getColumnIndexByName("behavior_logs", "detector");
-                        int modelCol = getColumnIndexByName("behavior_logs", "model_version");
-
-                        // Add derived columns for app_name and window_title if not present
-                        if (getColumnIndexByName("behavior_logs", "app_name") == -1) {
-                            tableModel.addColumn("app_name");
-                        }
-                        if (getColumnIndexByName("behavior_logs", "window_title") == -1) {
-                            tableModel.addColumn("window_title");
-                        }
-
-                        boolean needRescore = false;
-                        for (int r = 0; r < tableModel.getRowCount(); r++) {
-                            // fill detector placeholder
-                            if (detCol >= 0) {
-                                Object d = tableModel.getValueAt(r, detCol);
-                                if (d == null) {
-                                    // try detected_by fallback column
-                                    int dbCol = getColumnIndexByName("behavior_logs", "detected_by");
-                                    if (dbCol >= 0) {
-                                        Object dbv = tableModel.getValueAt(r, dbCol);
-                                        if (dbv != null) tableModel.setValueAt(dbv.toString(), r, detCol);
-                                        else tableModel.setValueAt("collector", r, detCol);
-                                    } else {
-                                        tableModel.setValueAt("collector", r, detCol);
-                                    }
-                                }
-                            }
-
-                            // fill model_version placeholder
-                            if (modelCol >= 0) {
-                                Object mv = tableModel.getValueAt(r, modelCol);
-                                if (mv == null) tableModel.setValueAt("if_model_v1", r, modelCol);
-                            }
-
-                            // extract app_name/window_title from raw_data for APP_ACTIVITY rows
-                            String appName = "";
-                            String winTitle = "";
-                            try {
-                                Object evtObj = evtCol >= 0 ? tableModel.getValueAt(r, evtCol) : null;
-                                String evt = evtObj != null ? evtObj.toString() : "";
-                                if (rawCol >= 0) {
-                                    Object rawObj = tableModel.getValueAt(r, rawCol);
-                                    if (rawObj != null && rawObj.toString().startsWith("{")) {
-                                        String raw = rawObj.toString();
-                                        java.util.regex.Pattern namePat = java.util.regex.Pattern.compile("\\\"name\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-                                        java.util.regex.Pattern titlePat = java.util.regex.Pattern.compile("\\\"title\\\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-                                        java.util.regex.Matcher m1 = namePat.matcher(raw);
-                                        if (m1.find()) appName = m1.group(1);
-                                        java.util.regex.Matcher m2 = titlePat.matcher(raw);
-                                        if (m2.find()) winTitle = m2.group(1);
-                                    }
-                                }
-                                // if this is an APP_ACTIVITY but we extracted nothing, set placeholder
-                                if ((evt != null && evt.toUpperCase().contains("APP")) && (appName.isEmpty())) {
-                                    appName = "UnknownApp";
-                                }
-                            } catch (Exception ex) { }
-
-                            // set derived columns (they were appended to the end)
-                            int appColIdx = getColumnIndexByName("behavior_logs", "app_name");
-                            int winColIdx = getColumnIndexByName("behavior_logs", "window_title");
-                            if (appColIdx >= 0) tableModel.setValueAt(appName, r, appColIdx);
-                            if (winColIdx >= 0) tableModel.setValueAt(winTitle, r, winColIdx);
-
-                            // mark for rescore if anomaly_score missing
-                            if (scoreCol >= 0) {
-                                Object sc = tableModel.getValueAt(r, scoreCol);
-                                if (sc == null) {
-                                    needRescore = true;
-                                    tableModel.setValueAt("Pending", r, scoreCol);
-                                }
-                            }
-                        }
-
-                        // If some rows lack anomaly_score, run the rescore in background once and reload when done
-                        if (needRescore && !rescoreRunning) {
-                            rescoreRunning = true;
-                            new Thread(() -> {
-                                try {
-                                    log("Triggering background rescore for missing anomaly_score values...");
-                                    ProcessBuilder pb = new ProcessBuilder("C:\\Users\\Ananya\\behavior_logger\\.venv\\Scripts\\python.exe", "C:\\Users\\Ananya\\behavior_logger\\python\\run_infer_once.py", "--rescore", "--limit", "500");
-                                    pb.directory(new java.io.File("C:\\Users\\Ananya\\behavior_logger"));
-                                    pb.redirectErrorStream(true);
-                                    Process p = pb.start();
-                                    try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
-                                        String line;
-                                        while ((line = br.readLine()) != null) {
-                                            final String l = line;
-                                            SwingUtilities.invokeLater(() -> log("Infer-bg: " + l));
-                                        }
-                                    }
-                                    p.waitFor();
-                                    // refresh the currently selected table rather than forcing behavior_logs to avoid replacing other tables unexpectedly
-                                    SwingUtilities.invokeLater(() -> {
-                                        try {
-                                            String sel = (String) tableSelector.getSelectedItem();
-                                            loadTableData(sel != null ? sel : "behavior_logs");
-                                        } catch (Exception ex) { loadTableData("behavior_logs"); }
-                                    });
-                                } catch (Exception ex) {
-                                    SwingUtilities.invokeLater(() -> log("Background rescore failed: " + ex.getMessage()));
-                                } finally {
-                                    rescoreRunning = false;
-                                }
-                            }).start();
-                        }
-                    }
-                } catch (Exception ex) { /* ignore behavior_logs post-processing errors */ }
-
                 // Update lastSeenId or lastSeenTimestamp for this table
                 try {
                     if (hasId) {
@@ -984,34 +808,6 @@ public class BehaviorLoggerUI extends JFrame {
 
                         // Scroll to top
                         if (dataTable.getRowCount() > 0) dataTable.scrollRectToVisible(dataTable.getCellRect(0, 0, true));
-                        // Format prediction labels and anomaly_score for the newly inserted rows
-                        try {
-                            int predCol = getColumnIndexByName(baseTable, "prediction");
-                            int scoreCol = getColumnIndexByName(baseTable, "anomaly_score");
-                            int newCount = newRows.size();
-                            for (int r = 0; r < newCount; r++) {
-                                if (predCol >= 0) {
-                                    Object pv = tableModel.getValueAt(r, predCol);
-                                    if (pv instanceof Number) {
-                                        int p = ((Number) pv).intValue();
-                                        tableModel.setValueAt(p == 1 ? "Anomaly" : "Normal", r, predCol);
-                                    } else if (pv != null) {
-                                        try { int p = Integer.parseInt(pv.toString()); tableModel.setValueAt(p == 1 ? "Anomaly" : "Normal", r, predCol); } catch (Exception ex) {}
-                                    }
-                                }
-                                if (scoreCol >= 0) {
-                                    Object sv = tableModel.getValueAt(r, scoreCol);
-                                    if (sv instanceof Number) {
-                                        double dv = ((Number) sv).doubleValue();
-                                        tableModel.setValueAt(anomalyScoreFormat.format(dv), r, scoreCol);
-                                    } else if (sv != null) {
-                                        try { double dv = Double.parseDouble(sv.toString()); tableModel.setValueAt(anomalyScoreFormat.format(dv), r, scoreCol); } catch (Exception ex) {}
-                                    }
-                                }
-                            }
-                        } catch (Exception ex) {
-                            // ignore formatting errors in live update
-                        }
                     }
                 }
             }
@@ -1174,21 +970,25 @@ public class BehaviorLoggerUI extends JFrame {
     
     private void startLogging() {
         try {
-            
+            // Prefer venv python if available so the child process uses the project's virtualenv
             String venvPython = "C:\\Users\\Ananya\\behavior_logger\\.venv\\Scripts\\python.exe";
             java.io.File venvFile = new java.io.File(venvPython);
             java.util.List<String> cmd = new java.util.ArrayList<>();
             if (venvFile.exists() && venvFile.isFile()) {
                 cmd.add(venvPython);
             } else {
+                // fallback to system python
                 cmd.add("python");
             }
             cmd.add("C:\\Users\\Ananya\\behavior_logger\\python\\behavior_log.py");
             ProcessBuilder pb = new ProcessBuilder(cmd);
+            // Set working directory to project root so relative paths resolve correctly
             pb.directory(new java.io.File("C:\\Users\\Ananya\\behavior_logger"));
             pb.redirectErrorStream(true);
             
             loggingProcess = pb.start();
+            
+            // Read process output and append to UI log in background
             new Thread(() -> {
                 try (BufferedReader reader = new BufferedReader(new InputStreamReader(loggingProcess.getInputStream()))) {
                     String line;
@@ -1205,6 +1005,7 @@ public class BehaviorLoggerUI extends JFrame {
             stopLoggingButton.setEnabled(true);
             statusLabel.setText("Logging started. Data is being collected...");
             
+            // Start a thread to wait for the process to exit
             new Thread(() -> {
                 try {
                     loggingProcess.waitFor();
@@ -1213,6 +1014,7 @@ public class BehaviorLoggerUI extends JFrame {
                         stopLoggingButton.setEnabled(false);
                         statusLabel.setText("Logging stopped.");
                         
+                        // Refresh the data
                         loadTableData((String)tableSelector.getSelectedItem());
                     });
                 } catch (InterruptedException e) {
@@ -1246,7 +1048,7 @@ public class BehaviorLoggerUI extends JFrame {
             new Thread(() -> {
                 try {
                     log("Processing captured logs into domain tables...");
-                    processLogsInUI(1000);
+                    processLogsInUI();
                     log("Processing complete. Refreshing view...");
                     SwingUtilities.invokeLater(() -> loadTableData((String)tableSelector.getSelectedItem()));
                 } catch (Exception ex) {
@@ -1258,66 +1060,23 @@ public class BehaviorLoggerUI extends JFrame {
 
     /**
      * Process unprocessed rows from behavior_logs inside the UI process.
+     * This is a best-effort processor: applies simple rules and inserts into domain tables.
      */
-    /**
-     * Process up to maxRows unprocessed rows from behavior_logs.
-     * Returns the number of rows processed in this call.
-     */
-    private int processLogsInUI(int maxRows) {
+    private void processLogsInUI() {
         try (Connection conn = DriverManager.getConnection(dbUrl, dbUser, dbPassword)) {
             conn.setAutoCommit(true);
 
-            String selectSql = "SELECT id, timestamp, event_type, hashed_event, raw_data FROM behavior_logs WHERE processed_at IS NULL ORDER BY timestamp ASC LIMIT " + maxRows;
-
-            // First, collect IDs of unprocessed rows we intend to handle in this run
-            java.util.List<Long> idList = new java.util.ArrayList<>();
-          try (PreparedStatement selIds = conn.prepareStatement("SELECT id FROM behavior_logs WHERE processed_at IS NULL ORDER BY timestamp ASC LIMIT " + maxRows);
-              ResultSet idRs = selIds.executeQuery()) {
-                while (idRs.next()) idList.add(idRs.getLong(1));
-            }
-
-            // If there are rows, run the one-shot Python batch inference to compute prediction/anomaly_score for them
-            if (!idList.isEmpty()) {
-                try {
-                    ProcessBuilder pb = new ProcessBuilder("C:\\Users\\Ananya\\behavior_logger\\.venv\\Scripts\\python.exe", "C:\\Users\\Ananya\\behavior_logger\\python\\run_infer_once.py");
-                    pb.directory(new java.io.File("C:\\Users\\Ananya\\behavior_logger"));
-                    pb.redirectErrorStream(true);
-                    Process p = pb.start();
-                    // Consume and log output
-                    try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
-                        String line;
-                        while ((line = br.readLine()) != null) {
-                            final String l = line;
-                            SwingUtilities.invokeLater(() -> log("Infer: " + l));
-                        }
-                    }
-                    p.waitFor();
-                } catch (Exception ex) {
-                    log("Failed to run batch inference: " + ex.getMessage());
-                }
-            }
-
-            // Re-query the full rows for the IDs we collected (or the original select if none)
-            String query;
-            if (idList.isEmpty()) {
-                query = selectSql;
-            } else {
-                // Build a param list for IN clause
-                StringBuilder inClause = new StringBuilder();
-                for (int i = 0; i < idList.size(); i++) {
-                    if (i > 0) inClause.append(',');
-                    inClause.append(idList.get(i));
-                }
-                query = "SELECT id, timestamp, event_type, hashed_event, raw_data, prediction, anomaly_score, detector, model_version FROM behavior_logs WHERE id IN (" + inClause.toString() + ") ORDER BY timestamp ASC";
-            }
-
-          try (PreparedStatement sel = conn.prepareStatement(query);
-              ResultSet rs = sel.executeQuery()) {
+            // Select any behavior_logs that haven't been processed yet. Using processed_at IS NULL
+            // matches the Python realtime processor's logic and ensures rows are not skipped
+            String selectSql = "SELECT id, timestamp, event_type, hashed_event, raw_data FROM behavior_logs WHERE processed_at IS NULL ORDER BY timestamp ASC LIMIT 1000";
+            try (PreparedStatement sel = conn.prepareStatement(selectSql);
+                 ResultSet rs = sel.executeQuery()) {
 
                 int processed = 0;
                 int anomalies = 0;
                 double confidenceSum = 0.0;
 
+                // Prepare common statements
                 PreparedStatement updLog = conn.prepareStatement("UPDATE behavior_logs SET prediction = ?, processed_at = CURRENT_TIMESTAMP, hashed_event = NULL WHERE id = ?");
                 PreparedStatement insKeystroke = null;
                 PreparedStatement insMouse = null;
@@ -1326,18 +1085,13 @@ public class BehaviorLoggerUI extends JFrame {
                 PreparedStatement insBehavior = null;
                 PreparedStatement insAlert = null;
 
-                try { insKeystroke = conn.prepareStatement("INSERT INTO keystroke_events (event_id, key_name, key_type, interval_ms) VALUES (?, ?, ?, ?)");
-                } catch (SQLException e) { log("keystroke preparedstmt missing: " + e.getMessage()); }
-                try { insMouse = conn.prepareStatement("INSERT INTO mouse_events (event_id, x_position, y_position, action, button, velocity, screen_region) VALUES (?, ?, ?, ?, ?, ?, ?)"); 
-                } catch (SQLException e) { log("mouse preparedstmt missing: " + e.getMessage()); }
-                try { insApp = conn.prepareStatement("INSERT INTO application_events (event_id, app_name, window_title, process_id, cpu_percent, memory_percent, thread_count) VALUES (?, ?, ?, ?, ?, ?, ?)"); 
-                } catch (SQLException e) { log("app preparedstmt missing: " + e.getMessage()); }
-                try { insSystem = conn.prepareStatement("INSERT INTO system_metrics (event_id, cpu_percent, memory_percent, memory_available_gb, disk_free_gb, network_bytes_sent, network_bytes_recv) VALUES (?, ?, ?, ?, ?, ?, ?)"); 
-                } catch (SQLException e) { log("system preparedstmt missing: " + e.getMessage()); }
-                try { insBehavior = conn.prepareStatement("INSERT INTO behavior_events (timestamp, event_type, hashed_value, prediction, confidence) VALUES (?, ?, ?, ?, ?)"); 
-                } catch (SQLException e) { log("behavior_events preparedstmt missing: " + e.getMessage()); }
-                try { insAlert = conn.prepareStatement("INSERT INTO alerts (timestamp, severity, message) VALUES (CURRENT_TIMESTAMP, ?, ?)"); 
-                } catch (SQLException e) { log("alerts preparedstmt missing: " + e.getMessage()); }
+                // Prepare optional inserts matching actual schemas
+                try { insKeystroke = conn.prepareStatement("INSERT INTO keystroke_events (event_id, key_name, key_type, interval_ms) VALUES (?, ?, ?, ?)"); } catch (SQLException e) { log("keystroke preparedstmt missing: " + e.getMessage()); }
+                try { insMouse = conn.prepareStatement("INSERT INTO mouse_events (event_id, x_position, y_position, action, button, velocity, screen_region) VALUES (?, ?, ?, ?, ?, ?, ?)"); } catch (SQLException e) { log("mouse preparedstmt missing: " + e.getMessage()); }
+                try { insApp = conn.prepareStatement("INSERT INTO application_events (event_id, app_name, window_title, process_id, cpu_percent, memory_percent, thread_count) VALUES (?, ?, ?, ?, ?, ?, ?)"); } catch (SQLException e) { log("app preparedstmt missing: " + e.getMessage()); }
+                try { insSystem = conn.prepareStatement("INSERT INTO system_metrics (event_id, cpu_percent, memory_percent, memory_available_gb, disk_free_gb, network_bytes_sent, network_bytes_recv) VALUES (?, ?, ?, ?, ?, ?, ?)"); } catch (SQLException e) { log("system preparedstmt missing: " + e.getMessage()); }
+                try { insBehavior = conn.prepareStatement("INSERT INTO behavior_events (timestamp, event_type, hashed_value, prediction, confidence) VALUES (?, ?, ?, ?, ?)"); } catch (SQLException e) { log("behavior_events preparedstmt missing: " + e.getMessage()); }
+                try { insAlert = conn.prepareStatement("INSERT INTO alerts (timestamp, severity, message) VALUES (CURRENT_TIMESTAMP, ?, ?)"); } catch (SQLException e) { log("alerts preparedstmt missing: " + e.getMessage()); }
 
                 while (rs.next()) {
                     long id = rs.getLong("id");
@@ -1349,46 +1103,24 @@ public class BehaviorLoggerUI extends JFrame {
                     int prediction = 0;
                     double confidence = 0.6;
 
-                        try {
-                            // Use prediction and anomaly_score already present in the row (batch inference run earlier)
-                            try {
-                                Object predObj = rs.getObject("prediction");
-                                if (predObj instanceof Number) prediction = ((Number) predObj).intValue();
-                                else if (predObj != null) prediction = Integer.parseInt(predObj.toString());
-                            } catch (Exception ex) { /* leave default */ }
+                    try {
+                        if (eventType != null && eventType.toUpperCase().contains("SYSTEM")) {
+                            prediction = 1; confidence = 0.75;
+                        } else if (raw != null && raw.toUpperCase().contains("CPU")) {
+                            prediction = 1; confidence = 0.8;
+                        }
 
-                            try {
-                                Object scoreObj = null;
-                                try { scoreObj = rs.getObject("anomaly_score"); } catch (Exception ignore) {}
-                                if (scoreObj instanceof Number) confidence = ((Number) scoreObj).doubleValue();
-                                else if (scoreObj != null) confidence = Double.parseDouble(scoreObj.toString());
-                            } catch (Exception ex) { /* leave default */ }
-
-                            try {
-                                Object detObj = null;
-                                try { detObj = rs.getObject("detector"); } catch (Exception ignore) {}
-                                if (detObj != null) {
-                                    // store detector if needed (kept for compatibility)
-                                }
-                            } catch (Exception ex) {}
-
-                            // Heuristic fallback if model values absent
-                            if (prediction == 0) {
-                                if (eventType != null && eventType.toUpperCase().contains("SYSTEM")) {
-                                    prediction = 1; confidence = 0.75;
-                                } else if (raw != null && raw.toUpperCase().contains("CPU")) {
-                                    prediction = 1; confidence = 0.8;
-                                }
-                            }
-
+                        // Update behavior_logs
                         try {
                             updLog.setInt(1, prediction);
                             updLog.setLong(2, id);
                             updLog.executeUpdate();
                         } catch (SQLException e) {
+                            // log and continue
                             log("Failed to update behavior_logs id=" + id + ": " + e.getMessage());
                         }
 
+                        // Domain inserts - map fields to actual schema columns
                         try {
                             if (eventType != null && eventType.toUpperCase().contains("KEY") && insKeystroke != null) {
                                 // parsed JSON may contain key_name, type, interval_ms
@@ -1562,23 +1294,11 @@ public class BehaviorLoggerUI extends JFrame {
                 try { if (insSystem != null) insSystem.close(); } catch (Exception ex) {}
                 try { if (insAlert != null) insAlert.close(); } catch (Exception ex) {}
                 try { if (updLog != null) updLog.close(); } catch (Exception ex) {}
-                // close optional statements
-                try { if (insKeystroke != null) insKeystroke.close(); } catch (Exception ex) {}
-                try { if (insMouse != null) insMouse.close(); } catch (Exception ex) {}
-                try { if (insApp != null) insApp.close(); } catch (Exception ex) {}
-                try { if (insSystem != null) insSystem.close(); } catch (Exception ex) {}
-                try { if (insAlert != null) insAlert.close(); } catch (Exception ex) {}
-                try { if (updLog != null) updLog.close(); } catch (Exception ex) {}
             }
-            return processed;
         } catch (SQLException e) {
             log("Processing DB error: " + e.getMessage());
-            return 0;
         }
     }
-
-    // Backwards-compatible no-arg overload (process up to 1000 rows)
-    private int processLogsInUI() { return processLogsInUI(1000); }
     
     private void exportData() {
         String tableName = (String)tableSelector.getSelectedItem();
@@ -1720,27 +1440,11 @@ public class BehaviorLoggerUI extends JFrame {
         processorScheduler = Executors.newSingleThreadScheduledExecutor();
         processorScheduler.scheduleAtFixedRate(() -> {
             try {
-                processLogsInUI(1000);
+                processLogsInUI();
             } catch (Exception e) {
                 log("Processor error: " + e.getMessage());
             }
         }, 0, 5, TimeUnit.SECONDS);
-
-        // Kick off a background backfill to process older unprocessed rows in batches until none remain
-        new Thread(() -> {
-            try {
-                log("Starting background backfill of unprocessed rows...");
-                int n = 0;
-                do {
-                    n = processLogsInUI(1000);
-                    log("Backfill batch processed: " + n + " rows");
-                    if (n > 0) Thread.sleep(500); // brief pause between batches
-                } while (n > 0);
-                log("Background backfill complete");
-            } catch (Exception ex) {
-                log("Backfill failed: " + ex.getMessage());
-            }
-        }).start();
         processorRunning = true;
         startProcessorButton.setEnabled(false);
         stopProcessorButton.setEnabled(true);
@@ -1808,63 +1512,6 @@ public class BehaviorLoggerUI extends JFrame {
             cpuUsageBar.setValue(30 + rand.nextInt(40)); // 30-70%
             memoryUsageBar.setValue(40 + rand.nextInt(30)); // 40-70%
             
-            // Update anomaly-related analytics (count and average confidence)
-            try (Statement astmt = conn.createStatement()) {
-                try (ResultSet ars = astmt.executeQuery("SELECT COUNT(*) AS anomalies, AVG(anomaly_score) AS avg_conf FROM behavior_logs WHERE prediction = 1")) {
-                    if (ars.next()) {
-                        int anomalies = ars.getInt("anomalies");
-                        double avgConf = ars.getDouble("avg_conf");
-                        anomalyCountLabel.setText(String.valueOf(anomalies));
-                        avgConfidenceLabel.setText(String.format("%.2f", avgConf));
-                    } else {
-                        anomalyCountLabel.setText("0");
-                        avgConfidenceLabel.setText("0.00");
-                    }
-                }
-            } catch (SQLException ex) {
-                // If anomaly_stats or anomaly columns are not present yet, ignore
-                anomalyCountLabel.setText("-");
-                avgConfidenceLabel.setText("-");
-            }
-
-            // Load recent application switches for display
-            try (PreparedStatement pa = conn.prepareStatement("SELECT raw_data, timestamp FROM behavior_logs WHERE event_type = 'APP_ACTIVITY' ORDER BY timestamp DESC LIMIT 10")) {
-                try (ResultSet aprs = pa.executeQuery()) {
-                    javax.swing.DefaultListModel<String> model = new javax.swing.DefaultListModel<>();
-                    java.util.regex.Pattern namePat = java.util.regex.Pattern.compile("\"name\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-                    java.util.regex.Pattern titlePat = java.util.regex.Pattern.compile("\"title\"\\s*:\\s*\\\"([^\\\"]+)\\\"");
-                    while (aprs.next()) {
-                        String raw = aprs.getString(1);
-                        Timestamp t = aprs.getTimestamp(2);
-                        String timeStr = t != null ? new SimpleDateFormat("HH:mm:ss").format(t) : "--:--:--";
-
-                        String appName = "Unknown";
-                        String winTitle = "";
-                        if (raw != null && raw.startsWith("{")) {
-                            try {
-                                java.util.regex.Matcher m1 = namePat.matcher(raw);
-                                if (m1.find()) appName = m1.group(1);
-                                java.util.regex.Matcher m2 = titlePat.matcher(raw);
-                                if (m2.find()) winTitle = m2.group(1);
-                            } catch (Exception ex) {
-                                // fallback to raw preview
-                                appName = "Unknown";
-                                winTitle = raw.length() > 60 ? raw.substring(0, 60) + "..." : raw;
-                            }
-                        } else if (raw != null) {
-                            // not JSON, show raw
-                            winTitle = raw.length() > 60 ? raw.substring(0, 60) + "..." : raw;
-                        }
-
-                        String display = String.format("%s - %s%s", timeStr, appName, (winTitle.isEmpty() ? "" : " — " + winTitle));
-                        model.addElement(display);
-                    }
-                    recentAppsList.setModel(model);
-                }
-            } catch (SQLException ex) {
-                // ignore recent apps errors
-            }
-
             log("Analytics updated");
             
         } catch (SQLException e) {
@@ -2067,3 +1714,7 @@ public class BehaviorLoggerUI extends JFrame {
         SwingUtilities.invokeLater(() -> new BehaviorLoggerUI());
     }
 }
+// Full copy of java/BehaviorLoggerUI.java placed in docs appendix for readability
+// This is a direct copy of the UI source to help reviewers read the code alongside the report.
+
+/* content omitted for brevity - full file exists in project root */

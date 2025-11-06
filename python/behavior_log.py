@@ -194,6 +194,10 @@ def setup_database(skip_db=False):
                     hashed_event TEXT,
                     raw_data JSON,
                     prediction INTEGER,
+                    anomaly_score DOUBLE,
+                    detector VARCHAR(64),
+                    model_version VARCHAR(32),
+                    detected_by VARCHAR(32),
                     processed_at TIMESTAMP NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -239,25 +243,45 @@ def log_event(event_type, event_data):
     if not hashed_event:
         return
     
-    # When running in no-database mode, just print the event
+    # Collector-side quick pre-flag heuristics for very-high-confidence signals
+    pre_flag = 0
+    pre_confidence = None
+    detected_by = None
+    anomaly_score = None
+    try:
+        if event_type == "SYSTEM_METRICS":
+            cpu = float(event_data.get('cpu_percent', 0))
+            if cpu >= 95:
+                pre_flag = 1
+                pre_confidence = 0.99
+                anomaly_score = pre_confidence
+                detected_by = 'collector'
+            elif cpu >= 85:
+                pre_flag = 1
+                pre_confidence = 0.75
+                anomaly_score = pre_confidence
+                detected_by = 'collector'
+    except Exception:
+        pass
+
     if 'SKIP_DB_MODE' in globals() and SKIP_DB_MODE:
         print(f"Event logged (no DB): {timestamp} - {event_type} - {hashed_event[:20]}...")
         return
 
-    # Try JDBC insert first if available
     conn = get_jdbc_connection()
     if conn:
         try:
             cursor = conn.cursor()
-            # Use parameterized insert where possible
+            # Include anomaly fields (collector may set anomaly_score/detected_by)
             try:
-                cursor.execute("INSERT INTO behavior_logs (timestamp, event_type, hashed_event, raw_data) VALUES (?, ?, ?, ?)", (timestamp, event_type, hashed_event, json.dumps(event_data)))
+                cursor.execute("INSERT INTO behavior_logs (timestamp, event_type, hashed_event, raw_data, anomaly_score, detector, model_version, detected_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (timestamp, event_type, hashed_event, json.dumps(event_data), anomaly_score, None, None, detected_by))
             except Exception:
-                # jaydebeapi may use different paramstyle; fall back to string formatting
                 et = event_type.replace("'", "''")
                 he = hashed_event.replace("'", "''")
                 rd = json.dumps(event_data).replace("'", "''")
-                sql = f"INSERT INTO behavior_logs (timestamp, event_type, hashed_event, raw_data) VALUES ({timestamp}, '{et}', '{he}', '{rd}')"
+                ascore = anomaly_score if anomaly_score is not None else 'NULL'
+                # Build SQL with appropriate NULLs if needed
+                sql = f"INSERT INTO behavior_logs (timestamp, event_type, hashed_event, raw_data, anomaly_score, detector, model_version, detected_by) VALUES ({timestamp}, '{et}', '{he}', '{rd}', {ascore}, NULL, NULL, {('\'' + detected_by + '\'') if detected_by else 'NULL'})"
                 cursor.execute(sql)
             cursor.close(); conn.close()
             print("[OK] MySQL Logged (JDBC):", event_type)
@@ -265,22 +289,19 @@ def log_event(event_type, event_data):
         except Exception as e:
             print("[WARN] JDBC insert failed:", e)
 
-    # Fall back to pure-Python mysql.connector
     pyc = get_py_connection()
     if pyc:
         try:
             cur = pyc.cursor()
-            cur.execute("INSERT INTO behavior_logs (timestamp, event_type, hashed_event, raw_data) VALUES (%s, %s, %s, %s)", (timestamp, event_type, hashed_event, json.dumps(event_data)))
+            cur.execute("INSERT INTO behavior_logs (timestamp, event_type, hashed_event, raw_data, anomaly_score, detector, model_version, detected_by) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (timestamp, event_type, hashed_event, json.dumps(event_data), anomaly_score, None, None, detected_by))
             cur.close(); pyc.close()
             print("[OK] MySQL Logged (mysql.connector):", event_type)
             return
         except Exception as e:
             print("[ERROR] mysql.connector insert failed:", e)
 
-    # If we reach here, no DB method worked; print the event
     print(f"Event logged (no DB available): {timestamp} - {event_type} - {hashed_event[:20]}...")
 
-# Keyboard event handlers
 def on_key_press(key):
     global stop_flag
     if stop_flag:
