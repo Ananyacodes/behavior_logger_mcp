@@ -6,6 +6,14 @@ An intelligent behavior monitoring and anomaly detection system that leverages m
 
 It captures user interactions (keystrokes, mouse movements, system metrics), processes them through cryptographic hashing, and uses neural networks to detect anomalous behavior patterns that could indicate security threats or unauthorized access.
 
+## Demo
+
+
+
+
+https://github.com/user-attachments/assets/6329d3af-0d6d-458f-8bbb-4e71dde06758
+
+
 ## Features
 
 - **Real-time Behavior Capture**: Monitors keystrokes, mouse clicks, and system metrics
