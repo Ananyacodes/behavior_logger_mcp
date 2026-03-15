@@ -1,152 +1,98 @@
-# Behavior Logger System
+# Behavior System
 
-An intelligent behavior monitoring and anomaly detection system that leverages machine learning to identify suspicious user patterns in real-time.
+A privacy-preserving, multi-device behavior monitoring system that keeps raw interaction logs on-device while sharing verifiable proof packets and compact model updates with a coordinator.
 
-## Overview
+## Core Capabilities
 
-It captures user interactions (keystrokes, mouse movements, system metrics), processes them through cryptographic hashing, and uses neural networks to detect anomalous behavior patterns that could indicate security threats or unauthorized access.
+- Captures keystrokes, mouse activity, app-switch events, and system metrics per device.
+- Builds windowed feature vectors locally and computes anomaly scores with a neural autoencoder.
+- Generates HMAC commitments over feature digest, anomaly score, model digest, and nonce.
+- Verifies proofs centrally without receiving raw behavior data.
+- Aggregates decentralized model updates in a federated-learning style.
+- Persists coordinator state across restarts (registered devices, accepted reports, update buffers).
 
-## Demo
+## Project Layout
 
+```text
+src/behavior_system/
+  collector.py            Event capture (live + simulation)
+  features.py             Windowed feature extraction
+  neural.py               Autoencoder anomaly scoring
+  crypto.py               Proof generation and verification
+  federated.py            Coordinator logic + persistence
+  runtime.py              On-device orchestration
+  schemas.py              Shared dataclasses and wire formats
 
+scripts/
+  coordinator_server.py   TCP coordinator service
+  demo_device.py          Device client (simulate/live)
+  run_demo.py             Single-process demo
+  train_local_model.py    Local baseline training utility
 
+tests/
+  test_system.py          Integration and persistence tests
 
-https://github.com/user-attachments/assets/6329d3af-0d6d-458f-8bbb-4e71dde06758
-
-
-## Features
-
-- **Real-time Behavior Capture**: Monitors keystrokes, mouse clicks, and system metrics
-- **Cryptographic Hashing**: Rust-powered secure data hashing for privacy
-- **Neural Network Detection**: GRU-based deep learning for pattern recognition
-- **Enterprise Integration**: JDBC connectivity with MySQL database
-- **Live Monitoring**: Real-time anomaly detection and alerting
-- **Privacy-First**: All behavioral data is hashed before storage
-- **Multiple UI Options**: Java Swing and Python Tkinter interfaces for data visualization
-
-## Components
-
-### Python Components
-
-- `behavior_log.py` - Core logging application that captures user behavior data
-- `realtime_infer.py` - Analyzes behavior data for patterns and anomalies
-- `ensure_database_mode.py` - Helper script to ensure database mode is enabled
-- `mysql_viewer.py` - Python-based UI for viewing database content
-
-### Java Components
-
-- `BehaviorLoggerUI.java` - Basic Java UI for viewing and managing behavior data
-- `BehaviorLoggerUIEnhanced.java` - Extended UI with JFreeChart visualizations
-- `BehaviorLoggerUIMain.java` - Entry point that selects the appropriate UI version
-
-### Rust Components
-
-- `hasher.rs` - Helper library for data processing
-- `main.rs` - Rust entry point for integration with the behavior logger
-
-## Project Structure
-
-```
-├── python/
-│   ├── behavior_log.py          # Main data collection
-│   ├── behavior_log.csv         # Local data storage (when DB unavailable)
-│   ├── realtime_infer.py        # Live anomaly detection
-│   ├── ensure_database_mode.py  # Database setup helper
-│   └── mysql_viewer.py          # Python UI for database viewing
-├── java/
-│   ├── BehaviorLoggerUI.java    # Basic Java UI
-│   ├── BehaviorLoggerUIEnhanced.java # Advanced Java UI with charts
-│   ├── BehaviorLoggerUIMain.java     # UI launcher
-│   └── build_and_run.bat        # Compilation and execution script
-├── rust_hasher/
-│   ├── src/
-│   │   ├── main.rs              # Rust hashing implementation
-│   │   └── hasher.rs            # Cryptographic functions
-│   └── Cargo.toml
-├── view_database.bat            # Quick database viewer launcher
-└── README.md
+data/
+  coordinator_state.json  Coordinator persisted state (created at runtime)
 ```
 
-## Usage Instructions
+## Install
 
-### Running the Behavior Logger
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
 
-1. Run `behavior_log.py` to start collecting behavior data
-   ```
-   python python\behavior_log.py
-   ```
+## Validate
 
-2. Data will be stored in the MySQL database under the `behavior_logs` table.
+```powershell
+python -m pytest tests/test_system.py
+python scripts\run_demo.py
+```
 
-### Viewing the Data
+## Run As Split Processes
 
-#### Option 1: Using Java UI (recommended)
+1. Start coordinator:
 
-1. Run the Java UI by executing `build_and_run.bat` in the `java` directory.
-   ```
-   cd java
-   build_and_run.bat
-   ```
+```powershell
+python scripts\coordinator_server.py --host 127.0.0.1 --port 8765
+```
 
-2. This will compile and launch the UI application. It will automatically attempt to load the enhanced version with JFreeChart visualizations if available.
+Optional flags:
 
-#### Option 2: Using Python Viewer
+```powershell
+python scripts\coordinator_server.py --host 127.0.0.1 --port 8765 --state-file data\coordinator_state.json
+```
 
-1. Run the MySQL viewer by executing:
-   ```
-   python python\mysql_viewer.py
-   ```
-   
-   Or use the batch script:
-   ```
-   view_database.bat
-   ```
+2. Start one or more devices:
 
-2. This will open a tkinter-based UI for viewing and querying the database.
+```powershell
+python scripts\demo_device.py --device-id laptop-a --secret demo-shared-secret --coordinator-host 127.0.0.1 --coordinator-port 8765 --simulate --rounds 5 --window-seconds 30
+python scripts\demo_device.py --device-id laptop-b --secret demo-shared-secret --coordinator-host 127.0.0.1 --coordinator-port 8765 --simulate --rounds 5 --window-seconds 30
+```
 
-### Analyzing the Data
+3. Query coordinator summary:
 
-1. In either UI, navigate to the Analytics/Statistics tab.
+```powershell
+python -c "import json,socket; s=socket.create_connection(('127.0.0.1',8765),timeout=5); s.sendall((json.dumps({'command':'summary'})+'\n').encode()); print(s.recv(8192).decode().strip()); s.close()"
+```
 
-2. You can see various metrics like:
-   - Event type distribution
-   - Activity patterns by hour
-   - Application usage statistics
-   - Keystroke patterns
+## Coordinator API (Line-delimited JSON over TCP)
 
-### Database Configuration
+- `register`: register device and shared secret.
+- `report`: submit a proof report.
+- `summary`: retrieve accepted-report stats and aggregation metadata.
+- `save`: flush coordinator state to disk immediately.
+- `health`: service readiness probe.
 
-Both UIs connect to the MySQL database using these settings:
-- Host: localhost
-- Port: 3306
-- Database: neurolock
-- Username: root
-- Password: JoeMama@25
+## Security Notes
 
-## Requirements
+- Raw event logs stay on-device.
+- Shared secrets are required for proof verification.
+- Persisted coordinator state contains device secrets and should be protected with filesystem permissions.
 
-### Python Requirements
-- Python 3.8+
-- pandas
-- jaydebeapi
-- jpype
-- tkinter
-- pynput (for behavior logging)
+## Current Status
 
-### Java Requirements
-- JDK 16+
-- MySQL Connector JAR (mysql-connector-j-9.4.0.jar)
-- JFreeChart 1.5.3 (optional, for enhanced visualizations)
-
-### Other Requirements
-- MySQL 8.0+
-- Java JVM for JDBC connections
-
-## from the repo root
-cd C:\Users\Ananya\behavior_logger\java
-
-# compile (include connector + chart jars)
-javac -cp ".;lib\mysql-connector-j-9.4.0.jar;lib\jfreechart-1.5.3.jar;lib\jcommon-1.0.24.jar" *.java
-
-# run UI
-powershell -NoProfile -ExecutionPolicy Bypass -Command "& 'C:\Users\Ananya\behavior_logger\java\build_and_run.ps1' -compileOnly"
+- End-to-end demo works in single-process and split-process modes.
+- Test suite covers feature extraction, proof verification, tamper rejection, aggregation shape, and state persistence.
