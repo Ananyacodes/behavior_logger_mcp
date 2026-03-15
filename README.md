@@ -2,6 +2,10 @@
 
 A privacy-preserving, multi-device behavior monitoring system that keeps raw interaction logs on-device while sharing verifiable proof packets and compact model updates with a coordinator.
 
+## Demo
+
+![Demo preview](assets/demo-preview.gif)
+
 ## Core Capabilities
 
 - Captures keystrokes, mouse activity, app-switch events, and system metrics per device.
